@@ -3,9 +3,14 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const { Session, connectDB } = require('./database');
 const { Op } = require('sequelize');
+const Razorpay = require('razorpay');
 require('dotenv').config();
 
 const app = express();
+const rzp = new Razorpay({
+    key_id: process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_SECRET,
+});
 
 // --- Production Middleware ---
 app.use(cors({ origin: process.env.CLIENT_URL || '*' }));
@@ -14,123 +19,92 @@ app.use(express.json());
 // Initialize Database Layer
 connectDB();
 
-// Root Ping Route (To wake up Free Tier Render)
-app.get('/', (req, res) => res.json({ status: 'Orchestrater Online', tier: 'PROD_MIDDLEWARE' }));
+// Root Ping Route
+app.get('/', (req, res) => res.json({ status: 'Orchestrater Online', rzp_active: !!process.env.RAZORPAY_KEY_ID }));
 
-/**
- * Split-Tender Orchestration Logic (Tier-1 Persistent)
- * Full State Machine Transition as per Project Proposal
- */
-
-// --- 1. Session Initialization (Orchestrator Entry) ---
+// --- 1. Session Initialization & REAL Razorpay Order Creation ---
 app.post('/api/orchestrate/initialize', async (req, res) => {
     const { totalAmount, cardLegAmount } = req.body;
-
+    
     if (!totalAmount || !cardLegAmount) {
         return res.status(400).json({ error: "Amount parameters missing" });
     }
 
-    const upiLegAmount = totalAmount - cardLegAmount;
-    const sessionID = `ORCH_${uuidv4().substring(0, 8).toUpperCase()}`;
-    const expiryDate = new Date(Date.now() + 10 * 60 * 1000); // 10 Min Strictly
-
     try {
+        const upiLegAmount = totalAmount - cardLegAmount;
+        const sessionID = `ORCH_${uuidv4().substring(0, 8).toUpperCase()}`;
+        const expiryDate = new Date(Date.now() + 10 * 60 * 1000);
+
+        // CREATE ACTUAL RAZORPAY ORDER FOR LEG 1
+        const rzpOrder = await rzp.orders.create({
+            amount: cardLegAmount * 100, // paise
+            currency: "INR",
+            receipt: sessionID,
+            notes: { orchestration_session: sessionID, leg: "CARD_PORTION" }
+        });
+
         const session = await Session.create({
             sessionID,
             totalAmount,
             cardLegAmount,
             upiLegAmount,
-            expiresAt: expiryDate
+            expiresAt: expiryDate,
+            cardTxID: rzpOrder.id // Store Order ID as temporary TxID
         });
 
-        console.log(`[ORCHESTRATOR] Persistent Session Initialized: ${sessionID} | Total: ₹${totalAmount}`);
         res.json({
             sessionID: session.sessionID,
+            rzpOrderID: rzpOrder.id,
             totalAmount: session.totalAmount,
             legs: {
                 card: { amount: session.cardLegAmount, status: session.cardStatus },
                 upi: { amount: session.upiLegAmount, status: session.upiStatus }
-            },
-            expiresAt: session.expiresAt
+            }
         });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: "Failed to initialize persistent session" });
+        console.error("[RZP ERROR]", err);
+        res.status(500).json({ error: "Gateway Initialization Failed", detail: err.message });
     }
 });
 
-// --- 2. Leg 1 (Card) Callback / Webhook Simulation ---
+// --- 2. Leg 1 (Card) Success callback ---
 app.post('/api/orchestrate/leg1-complete', async (req, res) => {
-    const { sessionID, txID } = req.body;
-
+    const { sessionID, rzpPaymentID } = req.body;
     try {
-        const session = await Session.findOne({
-            where: { sessionID, expiresAt: { [Op.gt]: new Date() } }
-        });
-
-        if (!session) return res.status(404).json({ error: "Session expired or invalid" });
+        const session = await Session.findOne({ where: { sessionID } });
+        if (!session) return res.status(404).json({ error: "Invalid Session" });
 
         session.cardStatus = 'AUTHORIZED';
-        session.cardTxID = txID;
+        session.cardTxID = rzpPaymentID;
         await session.save();
 
-        console.log(`[ORCHESTRATOR] Leg 1 Success: ${sessionID} | TX: ${txID}`);
         res.json({ success: true, next: 'UPI_LEG' });
     } catch (err) {
-        res.status(500).json({ error: "Internal State Update Error" });
+        res.status(500).json({ error: "State update failed" });
     }
 });
 
 // --- 3. Leg 2 (UPI) & Final Reconciliation ---
 app.post('/api/orchestrate/finalize', async (req, res) => {
     const { sessionID, txID } = req.body;
-
     try {
         const session = await Session.findOne({ where: { sessionID } });
-
         if (!session) return res.status(404).json({ error: "Session Not Found" });
-        if (session.cardStatus !== 'AUTHORIZED') {
-            return res.status(403).json({ error: "Pre-requisite Leg 1 Auth Missing" });
-        }
 
         session.upiStatus = 'SUCCESS';
         session.upiTxID = txID;
         session.reconciled = true;
         await session.save();
 
-        console.log(`[ORCHESTRATOR] FULL RECONCILIATION: ${sessionID} | Persistent Table Settled.`);
         res.json({ success: true, receipt: session });
     } catch (err) {
         res.status(500).json({ error: "Finalization Failure" });
     }
 });
 
-// --- 4. Special Failure Handler: Safe-Fail Refund Trigger ---
-app.post('/api/orchestrate/fail-recovery', async (req, res) => {
-    const { sessionID, errorReason } = req.body;
-
-    try {
-        const session = await Session.findOne({ where: { sessionID } });
-        if (!session) return res.status(404).json({ error: "Session Not Found" });
-
-        // If card was success but UPI failed, flag for refund
-        if (session.cardStatus === 'AUTHORIZED' && session.upiStatus !== 'SUCCESS') {
-            session.cardStatus = 'FAILED'; // Mocking Refund Status
-            await session.save();
-            console.log(`[ORCHESTRATOR] SAFE-FAIL RECOVERY: Refund queued for ${sessionID}`);
-        }
-
-        res.json({ success: true, status: 'RECOVERY_QUEUED' });
-    } catch (err) {
-        res.status(500).json({ error: "Recovery system offline" });
-    }
-});
-
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-    console.log(`\n-----------------------------------------`);
-    console.log(`SPLIT-PAYMENT PROPOSAL ORCHESTRATOR (PROD)`);
-    console.log(`Layer: Persistent PostgreSQL-Compatible Node Tier`);
+    console.log(`\n--- SPLIT TENDER ORCHESTRATOR RUNNING ---`);
     console.log(`Port: ${PORT}`);
-    console.log(`-----------------------------------------\n`);
+    console.log(`------------------------------------------\n`);
 });
