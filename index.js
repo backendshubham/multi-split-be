@@ -25,7 +25,7 @@ app.get('/', (req, res) => res.json({ status: 'Orchestrater Online', tier: 'PROD
 // --- 1. Session Initialization (Orchestrator Entry) ---
 app.post('/api/orchestrate/initialize', async (req, res) => {
     const { totalAmount, cardLegAmount } = req.body;
-    
+
     if (!totalAmount || !cardLegAmount) {
         return res.status(400).json({ error: "Amount parameters missing" });
     }
@@ -62,9 +62,9 @@ app.post('/api/orchestrate/initialize', async (req, res) => {
 // --- 2. Leg 1 (Card) Callback / Webhook Simulation ---
 app.post('/api/orchestrate/leg1-complete', async (req, res) => {
     const { sessionID, txID } = req.body;
-    
+
     try {
-        const session = await Session.findOne({ 
+        const session = await Session.findOne({
             where: { sessionID, expiresAt: { [Op.gt]: new Date() } }
         });
 
@@ -84,7 +84,7 @@ app.post('/api/orchestrate/leg1-complete', async (req, res) => {
 // --- 3. Leg 2 (UPI) & Final Reconciliation ---
 app.post('/api/orchestrate/finalize', async (req, res) => {
     const { sessionID, txID } = req.body;
-    
+
     try {
         const session = await Session.findOne({ where: { sessionID } });
 
@@ -108,16 +108,16 @@ app.post('/api/orchestrate/finalize', async (req, res) => {
 // --- 4. Special Failure Handler: Safe-Fail Refund Trigger ---
 app.post('/api/orchestrate/fail-recovery', async (req, res) => {
     const { sessionID, errorReason } = req.body;
-    
+
     try {
         const session = await Session.findOne({ where: { sessionID } });
         if (!session) return res.status(404).json({ error: "Session Not Found" });
 
         // If card was success but UPI failed, flag for refund
         if (session.cardStatus === 'AUTHORIZED' && session.upiStatus !== 'SUCCESS') {
-           session.cardStatus = 'FAILED'; // Mocking Refund Status
-           await session.save();
-           console.log(`[ORCHESTRATOR] SAFE-FAIL RECOVERY: Refund queued for ${sessionID}`);
+            session.cardStatus = 'FAILED'; // Mocking Refund Status
+            await session.save();
+            console.log(`[ORCHESTRATOR] SAFE-FAIL RECOVERY: Refund queued for ${sessionID}`);
         }
 
         res.json({ success: true, status: 'RECOVERY_QUEUED' });

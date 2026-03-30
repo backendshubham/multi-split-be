@@ -1,20 +1,35 @@
 const { Sequelize, DataTypes } = require('sequelize');
-const path = require('path');
 require('dotenv').config();
 
-// Auto-switch between PostgreSQL (Production/Render) and SQLite (Local)
-const isProduction = process.env.NODE_ENV === 'production' && process.env.DATABASE_URL;
+// Professional-Grade Environment Enforcement
+const { PGDATABASE, PGUSER, PGPASSWORD, PGHOST, PGPORT, DATABASE_URL } = process.env;
 
-const sequelize = isProduction
-  ? new Sequelize(process.env.DATABASE_URL, {
+const isPostgresReady = (PGDATABASE && PGUSER) || DATABASE_URL;
+
+if (!isPostgresReady) {
+  console.error("--- DATABASE CONFIGURATION ERROR ---");
+  console.error("The system cannot find PostgreSQL credentials.");
+  console.error(`- PGDATABASE: ${PGDATABASE ? 'OK' : 'MISSING'}`);
+  console.error(`- PGUSER: ${PGUSER ? 'OK' : 'MISSING'}`);
+  console.error(`- PGHOST: ${PGHOST ? 'OK' : 'MISSING'}`);
+  console.error("Please add these in the Render Dashboard Environment tab.");
+  console.error("--------------------------------------");
+  process.exit(1); // Forcefully stop the server with an error
+}
+
+// Optimized Sequelize Connection for Production
+const sequelize = DATABASE_URL
+  ? new Sequelize(DATABASE_URL, {
     dialect: 'postgres',
     protocol: 'postgres',
     dialectOptions: { ssl: { require: true, rejectUnauthorized: false } },
     logging: false
   })
-  : new Sequelize({
-    dialect: 'sqlite',
-    storage: path.join(__dirname, 'orchestrator.sqlite'),
+  : new Sequelize(PGDATABASE, PGUSER, PGPASSWORD, {
+    host: PGHOST,
+    port: PGPORT || 5432,
+    dialect: 'postgres',
+    dialectOptions: { ssl: { require: true, rejectUnauthorized: false } },
     logging: false
   });
 
@@ -35,9 +50,10 @@ const connectDB = async () => {
   try {
     await sequelize.authenticate();
     await sequelize.sync({ alter: true });
-    console.log(`[DATABASE] ${isProduction ? 'PostgreSQL (Render)' : 'SQLite (Local)'} initialized.`);
+    console.log('[DATABASE] Tier-1 PostgreSQL (Supersourcing) Successfully Connected.');
   } catch (err) {
-    console.error('[DATABASE] Core initialization failure:', err);
+    console.error('[DATABASE] Fatal Connection Failure:', err);
+    process.exit(1);
   }
 };
 
