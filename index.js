@@ -14,6 +14,9 @@ app.use(express.json());
 // Initialize Database Layer
 connectDB();
 
+// Root Ping Route (To wake up Free Tier Render)
+app.get('/', (req, res) => res.json({ status: 'Orchestrater Online', tier: 'PROD_MIDDLEWARE' }));
+
 /**
  * Split-Tender Orchestration Logic (Tier-1 Persistent)
  * Full State Machine Transition as per Project Proposal
